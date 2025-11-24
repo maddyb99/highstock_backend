@@ -4,6 +4,7 @@ import anthropic
 import os
 import json
 import re
+import requests
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for React frontend
@@ -61,9 +62,9 @@ Return ONLY a JSON object with this structure (no markdown, no explanation):
 {{
     "product_name": "Full product name with brand, size, and color",
     "msrp": "$XX.XX",
-    "image_url": "https://...",
+    "image_url": ["https://...","https://..."],
     "description": "Brief product description",
-    "match_confidence": 95,
+    "match_confidence": "your confidence with the result as integer",
     "source": "website name",
     "exact_match": true,
     "verification_notes": "Brief notes on match verification"
@@ -102,6 +103,36 @@ If you cannot find an exact match, set exact_match to false and match_confidence
         print(f"Error in AI search: {str(e)}")
         raise
 
+def search_product_with_upc(upc):
+    headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Accept-Encoding': 'gzip,deflate',
+            }
+    resp = requests.get(f"https://api.upcitemdb.com/prod/trial/lookup?upc={upc}", headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("items",0)==0:
+        raise ValueError("items cannot be 0")
+    f = open("resp.json","w")
+    json.dump(data,f)
+    item = data.get("items")[0]
+
+    result = {
+        "description": item["description"],
+        "image_url": item["images"],
+        "product_name": item["title"],
+        "source": "UPC Item DB",
+        "exact_match": True,
+        "match_confidence": 100,
+        "msrp": item.get("offers",[])[0].get("price",None)
+    }
+    print("**********UPC RESULT********")
+    print(result)
+
+    return result
+        
+
 @app.route('/api/lookup', methods=['POST'])
 def lookup_product():
     """
@@ -122,22 +153,30 @@ def lookup_product():
         upc = data['upc']
         size = data.get('size', '')
         color = data.get('color', '')
-        
-        # Search using AI
-        result = search_product_with_ai(
-            product_name=product_name,
-            brand_name=brand_name,
-            upc=upc,
-            size=size,
-            color=color
-        )
-        
-        # Check if exact match found
-        if not result.get('exact_match', False) or result.get('match_confidence', 0) < 70:
-            return jsonify({
-                'error': 'Could not find exact product match. Please verify the product details.',
-                'partial_result': result
-            }), 404
+        result = {}
+        try:
+            #search using UPC
+            result = search_product_with_upc(upc=upc)
+            # result = None
+            if result is None:
+                raise ValueError("result cannot be null")
+        except Exception as e:
+            print(e)
+            # Search using AI
+            result = search_product_with_ai(
+                product_name=product_name,
+                brand_name=brand_name,
+                upc=upc,
+                size=size,
+                color=color
+            )
+            print(result)
+            # Check if exact match found
+            if not result.get('exact_match', False) or result.get('match_confidence', 0) < 70:
+                return jsonify({
+                    'error': 'Could not find exact product match. Please verify the product details.',
+                    'partial_result': result
+                }), 404
         
         return jsonify(result), 200
         
