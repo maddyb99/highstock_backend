@@ -9,11 +9,6 @@ import requests
 app = Flask(__name__)
 CORS(app)  # Enable CORS for React frontend
 
-# Initialize Claude API client
-client = anthropic.Anthropic(
-    api_key=os.environ.get("ANTHROPIC_API_KEY")
-)
-
 def extract_json_from_response(text):
     """Extract JSON from Claude's response, handling markdown code blocks"""
     # Try to find JSON in markdown code blocks
@@ -29,6 +24,12 @@ def extract_json_from_response(text):
     return text
 
 def search_product_with_ai(product_name, brand_name, upc, size=None, color=None):
+
+    # Initialize Claude API client
+    client = anthropic.Anthropic(
+        api_key=os.environ.get("ANTHROPIC_API_KEY")
+    )
+
     """
     Use Claude with web search to find exact product match
     """
@@ -71,7 +72,7 @@ Return ONLY a JSON object with this structure (no markdown, no explanation):
 }}
 
 If you cannot find an exact match, set exact_match to false and match_confidence below 70."""
-
+    print(prompt)
     try:
         # Use Claude with web search tool
         message = client.messages.create(
