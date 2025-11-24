@@ -133,13 +133,13 @@ def search_product_with_upc(upc):
     return result
         
 
-@app.route('/api/lookup', methods=['POST'])
+@app.route('/api/lookup', methods=['GET'])
 def lookup_product():
     """
     Main API endpoint for product lookup
     """
     try:
-        data = request.json
+        data = request.args
         
         # Validate required fields
         required_fields = ['productName', 'brandName', 'upc']
