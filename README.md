@@ -48,7 +48,25 @@ Server runs on `http://localhost:5001`
 
 1. **Primary**: Queries UPC Item Database (fast, 100% confidence)
 2. **Fallback**: Uses Claude AI with web search if UPC lookup fails
-3. Returns 404 if match confidence < 70%
+3. Returns 404 if match confidence < 80%
+
+```mermaid
+graph TD
+
+    A[User Input] --> B{Valid UPC Provided?}
+    B -- Yes --> C[Query UPC Database]
+    B -- No --> E[Full AI Search]
+    
+    C --> D{Result Found?}
+    D -- No --> E
+    D -- Yes --> F[AI Verification Agent]
+    
+    F --> G{Match Confidence >= 80%?}
+    G -- Yes --> H[Return UPC Result]
+    G -- No --> E[Full AI Search with Google Grounding]
+    
+    E --> I[Return AI Enriched Result]
+```
 
 ## Requirements
 
