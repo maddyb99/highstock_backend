@@ -1,48 +1,66 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import anthropic
 import os
 import json
-import re
 import requests
+import time # Import for exponential backoff
+import re # Import for extracting JSON from markdown
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+CORS(app)  
+
+# Define the JSON schema (used in the prompt, but not in the API config due to the tool conflict)
+PRODUCT_SCHEMA_PROMPT = """
+{
+    "product_name": "Full product name with brand, size, and color",
+    "msrp": "$XX.XX",
+    "image_url": ["https://...", "https://..."],
+    "description": "Brief product description",
+    "match_confidence": 0,
+    "source": "website name",
+    "exact_match": true,
+    "verification_notes": "Brief notes on match verification"
+}
+"""
+
+# The Gemini API uses the GEMINI_API_KEY environment variable
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
+MAX_RETRIES = 5
 
 def extract_json_from_response(text):
-    """Extract JSON from Claude's response, handling markdown code blocks"""
-    # Try to find JSON in markdown code blocks
-    json_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+    """Extract JSON from the model's text response, handling markdown code blocks."""
+    # Pattern to find JSON enclosed in ```json...```
+    json_match = re.search(r'```json\s*(\{.*?})\s*```', text, re.DOTALL)
     if json_match:
-        return json_match.group(1)
+        return json_match.group(1).strip()
     
-    # Try to find raw JSON object
-    json_match = re.search(r'\{.*\}', text, re.DOTALL)
-    if json_match:
-        return json_match.group(0)
-    
-    return text
+    # Fallback: attempt to find a standalone JSON object
+    try:
+        # Simple attempt to load the entire text if it's already pure JSON
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        # Last resort: find the first and last brace to extract what looks like JSON
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            return text[start:end+1].strip()
+            
+    raise ValueError("Could not extract a valid JSON object from the AI response.")
+
 
 def search_product_with_ai(product_name, brand_name, upc, size=None, color=None):
-
-    # Initialize Claude API client
-    client = anthropic.Anthropic(
-        api_key=os.environ.get("ANTHROPIC_API_KEY")
-    )
-
     """
-    Use Claude with web search to find exact product match
+    Use Gemini with Google Search grounding to find exact product match.
+    Note: Structured JSON output (responseSchema) is disabled to allow for tool use.
     """
-    # Build search query
-    search_query = f"{brand_name} {product_name}"
-    if size:
-        search_query += f" {size}"
-    if color:
-        search_query += f" {color}"
-    search_query += f" UPC {upc}"
-    
-    prompt = f"""You are a product data enrichment assistant. Find the EXACT product match for:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise EnvironmentError("GEMINI_API_KEY environment variable not set.")
 
+    # Build detailed prompt for the AI
+    prompt = f"""You are a world-class product data enrichment assistant. Your task is to find the EXACT match for the following product details.
+
+Input Details:
 Product Name: {product_name}
 Brand: {brand_name}
 UPC: {upc}
@@ -50,86 +68,107 @@ UPC: {upc}
 {f"Color/Shade: {color}" if color else ""}
 
 CRITICAL REQUIREMENTS:
-1. Find the EXACT product match - same brand, same size/volume, same color/shade
-2. Do NOT return similar or alternative products
-3. Verify the UPC matches if possible
-4. Find the official MSRP (manufacturer's suggested retail price)
-5. Find a high-quality product image URL
-6. Provide a brief product description (2-3 sentences)
+1. Find the EXACT product match - same brand, same size/volume, and same color/shade if specified.
+2. Do NOT return similar or alternative products.
+3. Verify the UPC matches the product found through web search.
+4. Find the official MSRP (manufacturer's suggested retail price).
+5. Find at least one high-quality product image URL.
+6. Provide a brief, concise product description (max 3 sentences).
+7. If an exact match is not found or the UPC verification fails, set 'exact_match' to false and 'match_confidence' below 70.
 
-Search multiple retailer websites (Sephora, Ulta, brand's official website, Amazon, etc.) to verify the information.
+Return the result STRICTLY as a single JSON object matching the structure below. Wrap the JSON in a markdown code block (```json...```). Do not include any introductory or explanatory text outside the JSON block.
 
-Return ONLY a JSON object with this structure (no markdown, no explanation):
-{{
-    "product_name": "Full product name with brand, size, and color",
-    "msrp": "$XX.XX",
-    "image_url": ["https://...","https://..."],
-    "description": "Brief product description",
-    "match_confidence": "your confidence with the result as integer",
-    "source": "website name",
-    "exact_match": true,
-    "verification_notes": "Brief notes on match verification"
-}}
+JSON Structure MUST match this:
+{PRODUCT_SCHEMA_PROMPT}"""
 
-If you cannot find an exact match, set exact_match to false and match_confidence below 70."""
-    print(prompt)
-    try:
-        # Use Claude with web search tool
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            tools=[{
-                "type": "web_search_20250305",
-                "name": "web_search"
-            }],
-            messages=[{
-                "role": "user",
-                "content": prompt
-            }]
-        )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}]  # Enable Google Search grounding
+        # responseSchema is REMOVED to support tool use.
+    }
+    
+    # Construct the full URL with the API key
+    full_url = f"{GEMINI_API_URL}?key={api_key}"
+
+    # Implement exponential backoff for API calls
+    for i in range(MAX_RETRIES):
+        try:
+            response = requests.post(full_url, headers={'Content-Type': 'application/json'}, json=payload)
+            
+            # Raise HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status() 
+            
+            data = response.json()
+            
+            if not data.get("candidates") or not data["candidates"][0].get("content"):
+                raise ValueError(f"Gemini API response content missing or blocked. Data: {data}")
+
+            # Extract the raw text from the response
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            
+            # Extract and parse the JSON from the raw text
+            json_str = extract_json_from_response(raw_text)
+            
+            # The structured output should be pure JSON, so we can directly parse it
+            result = json.loads(json_str)
+            return result
         
-        # Extract response text from content blocks
-        response_text = ""
-        for block in message.content:
-            if hasattr(block, 'text'):
-                response_text += block.text
-        
-        # Extract and parse JSON
-        json_str = extract_json_from_response(response_text)
-        result = json.loads(json_str)
-        
-        return result
-        
-    except Exception as e:
-        print(f"Error in AI search: {str(e)}")
-        raise
+        except requests.exceptions.HTTPError as http_err:
+            print(f"HTTP Error: {http_err.response.status_code}. Response: {http_err.response.text}")
+            if i < MAX_RETRIES - 1:
+                wait_time = 2 ** i
+                print(f"Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"Gemini API failed after {MAX_RETRIES} attempts. Last HTTP error: {http_err}")
+                raise
+        except (ValueError, json.JSONDecodeError, requests.exceptions.RequestException) as e:
+            if i < MAX_RETRIES - 1:
+                wait_time = 2 ** i
+                print(f"Gemini API request failed ({type(e).__name__}). Retrying in {wait_time}s. Error: {e}")
+                time.sleep(wait_time)
+            else:
+                print(f"Gemini API failed after {MAX_RETRIES} attempts. Last error: {e}")
+                raise
 
 def search_product_with_upc(upc):
+    # Added User-Agent to prevent 403 errors from the external API
     headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'Accept-Encoding': 'gzip,deflate',
-            }
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Accept-Encoding': 'gzip,deflate',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    # Using the trial endpoint
     resp = requests.get(f"https://api.upcitemdb.com/prod/trial/lookup?upc={upc}", headers=headers)
-    resp.raise_for_status()
+    resp.raise_for_status() # Raise exception for 4xx or 5xx status codes
     data = resp.json()
-    if data.get("items",0)==0:
-        raise ValueError("items cannot be 0")
-    f = open("resp.json","w")
-    json.dump(data,f)
+    
+    if not data.get("items"):
+        # If the 'items' key is missing or empty list, treat as no result found
+        raise ValueError("No item found in UPC DB response.")
+        
     item = data.get("items")[0]
 
+    # Clean up MSRP data, some APIs return price in a sub-object
+    msrp_value = None
+    offers = item.get("offers")
+    if offers and len(offers) > 0:
+        msrp_value = offers[0].get("price", "N/A")
+        
+    # Format the result to match the AI search structure
     result = {
-        "description": item["description"],
-        "image_url": item["images"],
-        "product_name": item["title"],
+        "description": item.get("description", "No description available."),
+        # UPC DB returns a list of image URLs
+        "image_url": item.get("images", []),
+        "product_name": item.get("title", "Unknown Product"),
         "source": "UPC Item DB",
         "exact_match": True,
         "match_confidence": 100,
-        "msrp": item.get("offers",[])[0].get("price",None)
+        "msrp": f"${msrp_value}" if msrp_value is not None and msrp_value != "N/A" else "N/A",
+        "verification_notes": "Data retrieved directly from UPC Item DB."
     }
-    print("**********UPC RESULT********")
-    print(result)
 
     return result
         
@@ -137,43 +176,54 @@ def search_product_with_upc(upc):
 @app.route('/api/lookup', methods=['GET'])
 def lookup_product():
     """
-    Main API endpoint for product lookup
+    Main API endpoint for product lookup using GET query parameters
     """
     try:
+        # Use request.args for GET parameters (query string)
         data = request.args
         
         # Validate required fields
         required_fields = ['productName', 'brandName', 'upc']
         for field in required_fields:
             if not data.get(field):
-                return jsonify({'error': f'{field} is required'}), 400
+                return jsonify({'error': f'Query parameter "{field}" is required'}), 400
         
         # Extract data
-        product_name = data['productName']
-        brand_name = data['brandName']
-        upc = data['upc']
+        product_name = data.get('productName')
+        brand_name = data.get('brandName')
+        upc = data.get('upc')
         size = data.get('size', '')
         color = data.get('color', '')
         result = {}
+        
+        # --- Search Logic ---
         try:
-            #search using UPC
+            # 1. Search using UPC
             result = search_product_with_upc(upc=upc)
-            # result = None
             if result is None:
-                raise ValueError("result cannot be null")
-        except Exception as e:
-            print(e)
-            # Search using AI
-            result = search_product_with_ai(
-                product_name=product_name,
-                brand_name=brand_name,
-                upc=upc,
-                size=size,
-                color=color
-            )
-            print(result)
-            # Check if exact match found
+                raise ValueError("UPC search returned no result.")
+        except Exception as upc_e:
+            print(f"UPC Search Failed, falling back to AI: {upc_e}")
+            
+            # 2. Search using AI (Fallback)
+            try:
+                result = search_product_with_ai(
+                    product_name=product_name,
+                    brand_name=brand_name,
+                    upc=upc,
+                    size=size,
+                    color=color
+                )
+            except EnvironmentError as env_e:
+                # Handle missing API key specifically
+                return jsonify({'error': str(env_e)}), 500
+            except Exception as ai_e:
+                print(f"Gemini Search Failed: {ai_e}")
+                return jsonify({'error': f'AI Search failed to find the product: {str(ai_e)}'}), 500
+
+            # Check if AI result is good enough
             if not result.get('exact_match', False) or result.get('match_confidence', 0) < 70:
+                # Return partial result with 404
                 return jsonify({
                     'error': 'Could not find exact product match. Please verify the product details.',
                     'partial_result': result
@@ -182,9 +232,12 @@ def lookup_product():
         return jsonify(result), 200
         
     except json.JSONDecodeError as e:
-        return jsonify({'error': 'Invalid JSON response from AI'}), 500
+        return jsonify({'error': f'Invalid JSON structure from API response (Parsing Error): {str(e)}'}), 500
+    except requests.exceptions.HTTPError as e:
+        return jsonify({'error': f'External API Error (UPC DB or Gemini): {str(e)}'}), 500
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        # Generic catch-all error
+        return jsonify({'error': f'Internal Server Error: {str(e)}'}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -192,4 +245,5 @@ def health_check():
     return jsonify({'status': 'healthy'}), 200
 
 if __name__ == '__main__':
+    # Running in debug mode for local testing
     app.run(debug=True, host='0.0.0.0', port=5000)
