@@ -67,7 +67,35 @@ graph TD
     
     E --> I[Return AI Enriched Result]
 ```
-
+```mermaid
+graph LR
+    subgraph Frontend [Presentation Layer]
+        A[React UI]
+    end
+    
+    subgraph Backend [Orchestration Layer - Flask API]
+        B(Product Lookup Endpoint) --> C{Stage 1: UPC Lookup}
+        C -->|Success| D{Stage 2: AI Verification}
+        C -->|Failure| F
+        
+        D -->|High Confidence| G[Format & Return JSON]
+        D -->|Low Confidence| F[Stage 3: AI Search Fallback]
+    end
+    
+    subgraph External Services
+        H[(UPCitemDB API)]
+        I[(Gemini API - Verification)]
+        J[(Gemini API - Search/Grounding)]
+    end
+    
+    A --> B
+    C --> H
+    D --> I
+    F --> J
+    
+    G --> A
+    J --> B
+```
 ## Requirements
 
 ```
