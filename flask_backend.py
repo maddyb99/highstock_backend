@@ -155,7 +155,10 @@ def search_product_with_upc(upc):
     msrp_value = None
     offers = item.get("offers")
     if offers and len(offers) > 0:
-        msrp_value = offers[0].get("price", "N/A")
+        for offer in offers:
+            msrp_value = offer.get("price", None)
+            if msrp_value:
+                break
         
     # Format the result to match the AI search structure
     result = {
