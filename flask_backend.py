@@ -23,9 +23,17 @@ PRODUCT_SCHEMA_PROMPT = """
 }
 """
 
+VERIFICATION_SCHEMA_PROMPT = """
+{
+    "match_confidence": 0,
+    "verification_notes": "Brief comparison notes (e.g., 'Brand names match, product names are similar.')"
+}
+"""
+
 # The Gemini API uses the GEMINI_API_KEY environment variable
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
 MAX_RETRIES = 5
+MATCH_CONFIDENCE_THRESHOLD = 80 
 
 def extract_json_from_response(text):
     """Extract JSON from the model's text response, handling markdown code blocks."""
@@ -120,6 +128,31 @@ JSON Structure MUST match this:
 
     return call_gemini_api(prompt, use_search_tools=True)
 
+def verify_product_match(user_name, user_brand, upc_name, upc_description):
+    """
+    Use AI (without search grounding) to verify if the UPC result matches 
+    the user's input.
+    """
+    prompt = f"""You are a product data matching expert. Compare the 'User Input' against the 'UPC Database Result'.
+    
+    USER INPUT:
+    Product Name: {user_name}
+    Brand Name: {user_brand}
+
+    UPC DATABASE RESULT:
+    Product Name: {upc_name}
+    Description: {upc_description}
+    
+    Your task is to determine the confidence level (0-100) that the UPC database result is an exact match for the user's intended product, based *only* on the provided names.
+
+    Return the result STRICTLY as a single JSON object matching the structure below. Wrap the JSON in a markdown code block (```json...```). Do not include any introductory or explanatory text outside the JSON block.
+
+    JSON Structure MUST match this:
+    {VERIFICATION_SCHEMA_PROMPT}"""
+    
+    # Do not use search tools for this step
+    return call_gemini_api(prompt, use_search_tools=False)
+
 def search_product_with_upc(upc):
     # Added User-Agent to prevent 403 errors from the external API
     headers = {
@@ -194,6 +227,27 @@ def lookup_product():
             result = search_product_with_upc(upc=upc)
             if result is None:
                 raise ValueError("UPC search returned no result.")
+
+            verification_data = verify_product_match(
+                user_name=product_name,
+                user_brand=brand_name,
+                upc_name=result['product_name'],
+                upc_description=result['description']
+            )
+            
+            confidence = verification_data.get('match_confidence', 0)
+
+            if  confidence >= MATCH_CONFIDENCE_THRESHOLD:
+                print(f"AI Verification Succeeded. Returning UPC result.")
+                # Update UPC result with verification notes
+                result['match_confidence'] = confidence
+                result['verification_notes'] = f"UPC DB match verified against user input by AI. {verification_data.get('verification_notes', '')}"
+                return jsonify(result), 200
+            else:
+                # If verification fails, raise an exception to trigger the fallback
+                raise ValueError(f"UPC verification failed (Confidence: {confidence}%). Falling back to full AI search.")
+
+
         except Exception as upc_e:
             print(f"UPC Search Failed, falling back to AI: {upc_e}")
             
@@ -214,7 +268,7 @@ def lookup_product():
                 return jsonify({'error': f'AI Search failed to find the product: {str(ai_e)}'}), 500
 
             # Check if AI result is good enough
-            if not result.get('exact_match', False) or result.get('match_confidence', 0) < 70:
+            if not result.get('exact_match', False) or result.get('match_confidence', 0) < MATCH_CONFIDENCE_THRESHOLD:
                 # Return partial result with 404
                 return jsonify({
                     'error': 'Could not find exact product match. Please verify the product details.',
@@ -238,4 +292,4 @@ def health_check():
 
 if __name__ == '__main__':
     # Running in debug mode for local testing
-    app.run(debug=True, host='0.0.0.0', port=5002)
+    app.run(debug=True, host='0.0.0.0', port=5000)
