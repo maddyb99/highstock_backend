@@ -47,15 +47,52 @@ def extract_json_from_response(text):
             
     raise ValueError("Could not extract a valid JSON object from the AI response.")
 
-
-def search_product_with_ai(product_name, brand_name, upc, size=None, color=None):
-    """
-    Use Gemini with Google Search grounding to find exact product match.
-    Note: Structured JSON output (responseSchema) is disabled to allow for tool use.
-    """
+def call_gemini_api(prompt, use_search_tools=False):
+    """Generic function to handle Gemini API calls with exponential backoff."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise EnvironmentError("GEMINI_API_KEY environment variable not set.")
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+    }
+    
+    if use_search_tools:
+        payload["tools"] = [{"google_search": {}}]  # Enable Google Search grounding
+    
+    full_url = f"{GEMINI_API_URL}?key={api_key}"
+
+    for i in range(MAX_RETRIES):
+        try:
+            response = requests.post(full_url, headers={'Content-Type': 'application/json'}, json=payload)
+            response.raise_for_status() 
+            data = response.json()
+            
+            if not data.get("candidates") or not data["candidates"][0].get("content"):
+                raise ValueError(f"Gemini API response content missing or blocked. Data: {data}")
+
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            json_str = extract_json_from_response(raw_text)
+            
+            return json.loads(json_str)
+        
+        except requests.exceptions.HTTPError as http_err:
+            print(f"HTTP Error: {http_err.response.status_code}. Response: {http_err.response.text}")
+            if i < MAX_RETRIES - 1:
+                wait_time = 2 ** i
+                print(f"Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise
+        except (ValueError, json.JSONDecodeError, requests.exceptions.RequestException) as e:
+            if i < MAX_RETRIES - 1:
+                wait_time = 2 ** i
+                print(f"Gemini API request failed ({type(e).__name__}). Retrying in {wait_time}s. Error: {e}")
+                time.sleep(wait_time)
+            else:
+                raise
+
+def search_product_with_ai(product_name, brand_name, upc, size=None, color=None):
 
     # Build detailed prompt for the AI
     prompt = f"""You are a world-class product data enrichment assistant. Your task is to find the EXACT match for the following product details.
@@ -81,55 +118,7 @@ Return the result STRICTLY as a single JSON object matching the structure below.
 JSON Structure MUST match this:
 {PRODUCT_SCHEMA_PROMPT}"""
 
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"google_search": {}}]  # Enable Google Search grounding
-        # responseSchema is REMOVED to support tool use.
-    }
-    
-    # Construct the full URL with the API key
-    full_url = f"{GEMINI_API_URL}?key={api_key}"
-
-    # Implement exponential backoff for API calls
-    for i in range(MAX_RETRIES):
-        try:
-            response = requests.post(full_url, headers={'Content-Type': 'application/json'}, json=payload)
-            
-            # Raise HTTPError for bad responses (4xx or 5xx)
-            response.raise_for_status() 
-            
-            data = response.json()
-            
-            if not data.get("candidates") or not data["candidates"][0].get("content"):
-                raise ValueError(f"Gemini API response content missing or blocked. Data: {data}")
-
-            # Extract the raw text from the response
-            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-            
-            # Extract and parse the JSON from the raw text
-            json_str = extract_json_from_response(raw_text)
-            
-            # The structured output should be pure JSON, so we can directly parse it
-            result = json.loads(json_str)
-            return result
-        
-        except requests.exceptions.HTTPError as http_err:
-            print(f"HTTP Error: {http_err.response.status_code}. Response: {http_err.response.text}")
-            if i < MAX_RETRIES - 1:
-                wait_time = 2 ** i
-                print(f"Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-            else:
-                print(f"Gemini API failed after {MAX_RETRIES} attempts. Last HTTP error: {http_err}")
-                raise
-        except (ValueError, json.JSONDecodeError, requests.exceptions.RequestException) as e:
-            if i < MAX_RETRIES - 1:
-                wait_time = 2 ** i
-                print(f"Gemini API request failed ({type(e).__name__}). Retrying in {wait_time}s. Error: {e}")
-                time.sleep(wait_time)
-            else:
-                print(f"Gemini API failed after {MAX_RETRIES} attempts. Last error: {e}")
-                raise
+    return call_gemini_api(prompt, use_search_tools=True)
 
 def search_product_with_upc(upc):
     # Added User-Agent to prevent 403 errors from the external API
@@ -249,4 +238,4 @@ def health_check():
 
 if __name__ == '__main__':
     # Running in debug mode for local testing
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5002)
