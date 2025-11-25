@@ -16,4 +16,4 @@ EXPOSE 5000
 
 # Command to run the app (using Gunicorn for production stability)
 # Replace 'app:app' with 'your_filename:your_flask_variable'
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "flask_backend:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "run:app"]
