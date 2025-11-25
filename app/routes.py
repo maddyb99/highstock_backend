@@ -9,6 +9,10 @@ from app.services import (
     verify_product_match,
     search_product_with_upc,
 )
+from app.services import (
+    search_product_with_db,
+    insert_product,
+)
 from app.schemas import LookupParams, ProductResult, VerificationResult
 from config import MATCH_CONFIDENCE_THRESHOLD
 
@@ -25,7 +29,17 @@ def lookup_product():
         except ValidationError as ve:
             return jsonify({'error': 'Invalid query parameters', 'details': ve.errors()}), 400
 
-        # Try UPC lookup first
+        # Try DB lookup first
+        try:
+            db_result = search_product_with_db(upc=params.upc, product_name=params.productName, brand=params.brandName)
+            if db_result:
+                product = ProductResult.parse_obj({**db_result, 'match_confidence': 100})
+                return Response(product.json(), mimetype='application/json'), 200
+        except Exception as e:
+            print("DB Lookup Failed, continuing to UPC/AI fallbacks: " + str(e))
+            pass
+
+        # Try UPC lookup
         try:
             upc_result = search_product_with_upc(upc=params.upc)
             
@@ -48,6 +62,12 @@ def lookup_product():
             if verification.match_confidence >= MATCH_CONFIDENCE_THRESHOLD:
                 # Return the UPC result with updated confidence
                 product = ProductResult.parse_obj({**upc_result, 'match_confidence': verification.match_confidence})
+                # persist for next time 
+                try:
+                    insert_product({**product.dict(), 'upc': params.upc, 'brand': params.brandName})
+                except Exception as e:
+                    print(f"Upsert Failed: {e}")
+                    pass
                 # Return a JSON string produced by pydantic to ensure HttpUrl and other types are serialized
                 return Response(product.json(), mimetype='application/json'), 200
             else:
@@ -93,6 +113,12 @@ def lookup_product():
                     'error': 'Could not find exact product match. Please verify the product details.',
                     'partial_result': partial
                 }), 404
+
+            # persist for next time 
+            try:
+                insert_product({**product.dict(), 'upc': params.upc, 'brand': params.brandName})
+            except Exception:
+                pass
 
             return Response(product.json(), mimetype='application/json'), 200
 
